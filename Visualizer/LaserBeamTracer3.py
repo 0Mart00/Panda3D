@@ -217,3 +217,4 @@ class LaserBeamTracer(ShowBase):
 if __name__ == "__main__":
     app = LaserBeamTracer()
     app.run()
+    
