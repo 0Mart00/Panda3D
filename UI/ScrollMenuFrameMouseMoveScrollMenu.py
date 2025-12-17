@@ -3,7 +3,8 @@ from panda3d.core import LVector2, loadPrcFileData, TextNode
 from direct.gui.DirectFrame import DirectFrame
 from direct.gui.DirectButton import DirectButton
 from direct.gui.OnscreenText import OnscreenText
-from direct.gui.DirectScrolledList import DirectScrolledList
+# DirectScrolledList helyett DirectScrolledFrame-et importálunk
+from direct.gui.DirectScrolledFrame import DirectScrolledFrame 
 from direct.gui import DirectGuiGlobals as DGG
 from direct.task import Task
 import random
@@ -51,7 +52,7 @@ class ManualFrameApp(ShowBase):
         self.active_frame = None 
         self.resizing_corner = None
         self.internal_button = None
-        self.scroll_list = None 
+        self.scroll_frame = None # scroll_list helyett scroll_frame
         self.frame1 = None 
         self.frame2 = None 
         self.frame_list = []
@@ -121,54 +122,53 @@ class ManualFrameApp(ShowBase):
         )
         self.frame_list.append(self.frame2)
 
-        # --- GÖRGŐS LISTA --- 
-        list_items = []
+        # --- DirectScrolledFrame LÉTREHOZÁSA ---
+        
+        # Kiszámoljuk a vászon (canvas) méretét az elemek alapján
+        canvas_height = SCROLL_LIST_NUM_ITEMS * (SCROLL_ITEM_HEIGHT + 0.01) # Kis térköz
+        
+        self.scroll_frame = DirectScrolledFrame(
+            parent=self.frame2,
+            frameSize=(-0.4, 0.4, -0.4, 0.4), # Kezdeti méret
+            canvasSize=(-0.3, 0.3, -canvas_height, 0), # A vászon mérete (lefelé nyúlik)
+            scrollBarWidth=0.04,
+            frameColor=(0.3, 0.3, 0.3, 0.8),
+            pos=(0, 0, -0.1),
+            scale=(1, 1, 1),
+            manageScrollBars=True, # Fontos: engedjük, hogy kezelje a scrollbarokat
+            autoHideScrollBars=False # Mindig mutassa a görgetősávot, ha kell
+        )
+        
+        # Elemek hozzáadása a vászonhoz (getCanvas())
         for i in range(SCROLL_LIST_NUM_ITEMS):
             color = (random.random(), random.random(), random.random(), 1)
-            item = DirectButton(
+            # Y pozíció: fentről lefelé haladva
+            y_pos = -0.05 - (i * (SCROLL_ITEM_HEIGHT + 0.01))
+            
+            btn = DirectButton(
                 text=f"Lista Elem #{i + 1}",
                 text_scale=0.05,
                 text_align=TextNode.ALeft,
                 text_pos=(-0.1, -0.015),
                 frameColor=color,
                 frameSize=(-0.3, 0.3, -SCROLL_ITEM_HEIGHT/2, SCROLL_ITEM_HEIGHT/2),
+                pos=(0, 0, y_pos),
                 relief=1,
+                parent=self.scroll_frame.getCanvas(), # FONTOS: a vászonhoz adjuk!
                 command=lambda i=i: self.status_text.setText(f"Elem: {i+1} kiválasztva")
             )
-            list_items.append(item)
-            
-        self.scroll_list = DirectScrolledList(
-            parent=self.frame2,
-            # A gombok definíciója megmarad a belső logika miatt, de elrejtjük őket
-            decButton_pos=( 0.4, 0, 0.22), 
-            decButton_text = "Fel",
-            decButton_text_scale = 0.05,
-            incButton_pos=( 0.4, 0, -0.22),
-            incButton_text = "Le",
-            incButton_text_scale = 0.05,
-            frameColor = (0.3, 0.3, 0.3, 0.8),
-            itemFrame_frameColor = (0.5, 0.5, 0.5, 1),
-            items = list_items,
-            numItemsVisible = 4, 
-            forceHeight = SCROLL_ITEM_HEIGHT,
-            pos=(0, 0, -0.1),
-            scale=(1, 1, 1)
-        )
+            # A gomb ne zavarja be a görgetést, ha "üres" helyre kattintunk a gombon,
+            # de mivel a DirectButton elfogja az eseményeket, a görgőzés globálisan van kezelve.
 
-        # GOMBOK ELREJTÉSE (Ha a görgővel történik a scroll)
-        if hasattr(self.scroll_list, 'incButton'):
-            self.scroll_list.incButton.hide()
-        if hasattr(self.scroll_list, 'decButton'):
-            self.scroll_list.decButton.hide()
-        
         self._update_frame2_content(initial_width, initial_height)
 
-    # --- GÖRGETŐS FUNKCIÓK JAVÍTVA (Panda3D bounds check használatával) ---
+    # --- GÖRGETŐS FUNKCIÓK ---
 
     def _setup_scroll_events(self):
         # Globalis görgetés események
-        self.accept('wheel_up', self._on_scroll_up)
-        self.accept('wheel_down', self._on_scroll_down)
+        # A handle_scroll logika alapján, itt paramétereket adunk át
+        self.accept('wheel_up', self._on_scroll, [-0.05]) # Felfelé csökkentjük az értéket (felfelé megy a tartalom)
+        self.accept('wheel_down', self._on_scroll, [0.05]) # Lefelé növeljük
 
     def _is_cursor_strictly_inside(self, frame):
         """Eldönti, hogy a kurzor egy frame-en belül van-e (frameSize alapján)."""
@@ -184,64 +184,70 @@ class ManualFrameApp(ShowBase):
         min_x, max_x, min_z, max_z = frame['frameSize']
         return min_x <= local.x <= max_x and min_z <= local.z <= max_z
     
-    # Ezt a függvényt használjuk a görgetés aktiválásához, amikor az egér a lista felett van
-    def _is_mouse_over_scroll_items(self):
-        """True, ha az egér a scroll lista látható részén van (render2d koordinátákban)."""
+    def _is_mouse_over_scroll_frame(self):
+        """True, ha az egér a scroll frame látható területe felett van (megbízható ellenőrzés)."""
         if not base.mouseWatcherNode.hasMouse():
             return False
 
         mw = base.mouseWatcherNode
-        mouse_x = mw.getMouseX()
-        mouse_y = mw.getMouseY()
+        # Egér pozíció render2d koordinátákban
+        mouse_render2d = Point3(mw.getMouseX(), 0, mw.getMouseY())
 
-        # A DirectScrolledList magába foglalja a listát tartó frame-et (itemFrame)
-        frame = self.scroll_list
+        # A scroll_frame lokális terébe transzformálunk
+        # Ez kezeli a parent (frame2) mozgatását és skálázását is!
+        local = self.scroll_frame.getRelativePoint(render2d, mouse_render2d)
+
+        # A DirectScrolledFrame frameSize-a a látható ablak mérete
+        # A scroll_frame dictionary-ből olvassuk ki a pontos határokat
+        min_x, max_x, min_z, max_z = self.scroll_frame['frameSize']
         
-        p1 = Point3()
-        p2 = Point3()
-        try:
-            # calcTightBounds a scroll_list látható frame-jének (itemFrame) határait adja vissza
-            # Ezt használjuk a precíz egér pozíció ellenőrzéséhez.
-            frame.calcTightBounds(p1, p2, render2d)
-        except Exception as e:
-            return False
+        return min_x <= local.x <= max_x and min_z <= local.z <= max_z
 
-        abs_min_x = p1.getX()
-        abs_max_x = p2.getX()
-        abs_min_y = p1.getZ() 
-        abs_max_y = p2.getZ()
-
-        is_over = (abs_min_x <= mouse_x <= abs_max_x) and \
-                  (abs_min_y <= mouse_y <= abs_max_y)
-        
-        return is_over
+    def _on_scroll(self, amount):
+        """Közös görgető függvény, ami a mintakód logikáját követi."""
+        if self.active_frame is not None:
+            return
+            
+        # Ha a ScrollFrame felett vagyunk, akkor a menüt görgetjük
+        if self._is_mouse_over_scroll_frame():
+            # A DirectScrolledFrame görgető sávja
+            scroll_bar = self.scroll_frame.verticalScroll
+            
+            # Ellenőrizzük, hogy létezik-e és nem rejtett
+            if scroll_bar and not scroll_bar.isHidden():
+                current_val = scroll_bar['value']
+                
+                # A scrollbar range-ét lekérdezzük (alapértelmezett: 0-1, de biztosra megyünk)
+                scroll_range = scroll_bar['range']
+                min_val = scroll_range[0]
+                max_val = scroll_range[1]
+                
+                # Kiszámoljuk az új értéket és korlátozzuk a range-en belül
+                new_val = max(min_val, min(max_val, current_val + amount))
+                
+                # Beállítjuk az új értéket
+                scroll_bar['value'] = new_val
+        else:
+            # Egyébként a kamerát zoomoljuk (ahogy az eredeti kódban is volt)
+            # Itt az 'amount' iránya fordított a kamera Y-hoz képest a scrollbarhoz viszonyítva
+            
+            # Negatív amount (wheel_up) -> közelebb megyünk
+            # Pozitív amount (wheel_down) -> távolodunk
+            
+            current_y = base.camera.getY()
+            if amount < 0: # Wheel Up
+                base.camera.setY(min(CAMERA_ZOOM_MAX_DIST, current_y + CAMERA_ZOOM_STEP))
+            else: # Wheel Down
+                base.camera.setY(max(CAMERA_ZOOM_MIN_DIST, current_y - CAMERA_ZOOM_STEP))
 
     def _on_scroll_up(self):
-        """Görgetés felfelé: ha az egér a scroll lista látható elemei felett van, scrollozza a listát."""
-        if self.active_frame is not None:
-            return
-        
-        # Visszatérés az eredeti logikához: görgetés csak a lista elemei felett
-        if self._is_mouse_over_scroll_items():
-            self.scroll_list.scrollBy(-1) 
-        else:
-            # Kamera zoom, ha nincs az egér a listán
-            current_y = base.camera.getY()
-            base.camera.setY(min(CAMERA_ZOOM_MAX_DIST, current_y + CAMERA_ZOOM_STEP))
-
+        # Kompatibilitás miatt meghagyva, de az _on_scroll kezeli
+        self._on_scroll(-0.05)
 
     def _on_scroll_down(self):
-        """Görgetés lefelé: ha az egér a scroll lista látható elemei felett van, scrollozza a listát."""
-        if self.active_frame is not None:
-            return
-        
-        # Visszatérés az eredeti logikához: görgetés csak a lista elemei felett
-        if self._is_mouse_over_scroll_items():
-            self.scroll_list.scrollBy(1) 
-        else:
-            # Kamera zoom, ha nincs az egér a listán
-            current_y = base.camera.getY()
-            base.camera.setY(max(CAMERA_ZOOM_MIN_DIST, current_y - CAMERA_ZOOM_STEP))
+         # Kompatibilitás miatt meghagyva, de az _on_scroll kezeli
+        self._on_scroll(0.05)
+
 
     # Az alábbi _update_button_scale a Frame 1 méretezését kezeli
     def _update_button_scale(self, width, height):
@@ -265,37 +271,27 @@ class ManualFrameApp(ShowBase):
 
         self.internal_button['text_scale'] = (ts_x, ts_y)
 
-    # Az alábbi _update_frame2_content a Frame 2 tartalmának (scroll list) méretezését és pozícióját kezeli
+    # Az alábbi _update_frame2_content a Frame 2 tartalmának (scroll frame) méretezését és pozícióját kezeli
     def _update_frame2_content(self, width, height):
-        if not self.scroll_list:
+        if not self.scroll_frame:
             return
         
         target_width = width * SCROLL_LIST_FRACTION
         target_height = height * SCROLL_LIST_FRACTION
 
-        # Az eredeti DirectScrolledList mérete a inicializáláskor
-        base_scroll_width = 0.8 # (0.4 * 2, ha a frameSize -0.4, 0.4 lenne) - A tartalomhoz igazítottuk
+        # Az alap méretek, amihez viszonyítunk
+        base_scroll_width = 0.8 
         base_scroll_height = 0.8 
         
         scale_x = target_width / base_scroll_width
         scale_y = target_height / base_scroll_height
         
-        self.scroll_list.setScale(scale_x, 1, scale_y)
+        self.scroll_frame.setScale(scale_x, 1, scale_y)
         
-        # Új pozíció beállítása, hogy a lista a frame belsejében maradjon
-        frame_half_height = height / 2
-        list_half_height_in_frame_coords = (base_scroll_height / 2) * scale_y
-        
-        # Az eredeti frame-ben a lista a (-0.1) Z pozícióban volt
+        # Új pozíció beállítása
+        # A Z pozíció korrekciója, hogy a frame belsejében maradjon
         Z_target = -0.1 * scale_y 
-        
-        # A lista aljának (min_y) és a frame aljának (-frame_half_height) összehangolása
-        # Ennek célja, hogy a lista ne lógjon ki az alján, de ne is legyen túl magasan
-        Z_required_to_stay_in_bounds = -frame_half_height + list_half_height_in_frame_coords
-        
-        # Mivel a frame2 szövege felül van, a lista közepe ideálisan Z=0 közelében van, 
-        # de nem szükséges szigorúan korlátozni, maradjunk az eredeti eltolásnál (-0.1) skálázva.
-        self.scroll_list.setZ(Z_target)  # Beállítjuk a skálázott pozíciót
+        self.scroll_frame.setZ(Z_target)
 
 
     def _check_interaction_area(self, mouse_x_norm, mouse_y_norm, frame):
@@ -498,7 +494,7 @@ class ManualFrameApp(ShowBase):
 
     # Az alábbi _update_frame2_content a Frame 2 tartalmának (scroll list) méretezését és pozícióját kezeli
     def _update_frame2_content(self, width, height):
-        if not self.scroll_list:
+        if not self.scroll_frame:
             return
         
         target_width = width * SCROLL_LIST_FRACTION
@@ -511,22 +507,15 @@ class ManualFrameApp(ShowBase):
         scale_x = target_width / base_scroll_width
         scale_y = target_height / base_scroll_height
         
-        self.scroll_list.setScale(scale_x, 1, scale_y)
+        self.scroll_frame.setScale(scale_x, 1, scale_y)
         
         # Új pozíció beállítása, hogy a lista a frame belsejében maradjon
         frame_half_height = height / 2
-        list_half_height_in_frame_coords = (base_scroll_height / 2) * scale_y
         
         # Az eredeti frame-ben a lista a (-0.1) Z pozícióban volt
         Z_target = -0.1 * scale_y 
         
-        # A lista aljának (min_y) és a frame aljának (-frame_half_height) összehangolása
-        # Ennek célja, hogy a lista ne lógjon ki az alján, de ne is legyen túl magasan
-        Z_required_to_stay_in_bounds = -frame_half_height + list_half_height_in_frame_coords
-        
-        # Mivel a frame2 szövege felül van, a lista közepe ideálisan Z=0 közelében van, 
-        # de nem szükséges szigorúan korlátozni, maradjunk az eredeti eltolásnál (-0.1) skálázva.
-        self.scroll_list.setZ(Z_target)  # Beállítjuk a skálázott pozíciót
+        self.scroll_frame.setZ(Z_target)
 
 
     def stop_interaction(self):
